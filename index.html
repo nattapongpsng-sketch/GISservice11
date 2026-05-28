@@ -496,6 +496,10 @@ let graph = {
   edges: []
 };
 
+let edgeSpatialIndex = null;
+
+const SPATIAL_CELL_M = 80; // ปรับได้ 50-150 m
+
 initMap();
 
 /* ================= MAP ================= */
@@ -1402,6 +1406,11 @@ function buildGraphFromLines(){
     edges:[]
   };
 
+  edgeSpatialIndex = {
+    cellM: SPATIAL_CELL_M,
+    cells: new Map()
+  };
+
   lineGeojson.features.forEach((f,idx)=>{
 
     const geom = f.geometry;
@@ -1439,12 +1448,121 @@ function buildGraphFromLines(){
         addAdj(aId,bId,edge);
         addAdj(bId,aId,edge);
 
+        addEdgeToSpatialIndex(edge);
       }
 
     });
 
   });
 
+  console.log(
+    'GRAPH_READY',
+    {
+      nodes: graph.nodes.size,
+      edges: graph.edges.length,
+      spatialCells: edgeSpatialIndex.cells.size
+    }
+  );
+}
+
+function coordToMeters_(coord){
+
+  const lng = coord[0];
+  const lat = coord[1];
+
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos(lat * Math.PI / 180);
+
+  return {
+    x: lng * mPerDegLng,
+    y: lat * mPerDegLat
+  };
+}
+
+function latLngToMeters_(latlng){
+
+  const lat = latlng.lat;
+  const lng = latlng.lng;
+
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos(lat * Math.PI / 180);
+
+  return {
+    x: lng * mPerDegLng,
+    y: lat * mPerDegLat
+  };
+}
+
+function spatialCellKeyXY_(x, y){
+
+  const cellM = edgeSpatialIndex?.cellM || SPATIAL_CELL_M;
+
+  const cx = Math.floor(x / cellM);
+  const cy = Math.floor(y / cellM);
+
+  return `${cx},${cy}`;
+}
+
+function addEdgeToSpatialIndex(edge){
+
+  if(!edgeSpatialIndex) return;
+
+  const a = coordToMeters_(edge.aCoord);
+  const b = coordToMeters_(edge.bCoord);
+
+  const minX = Math.min(a.x, b.x);
+  const maxX = Math.max(a.x, b.x);
+  const minY = Math.min(a.y, b.y);
+  const maxY = Math.max(a.y, b.y);
+
+  const cellM = edgeSpatialIndex.cellM;
+
+  const minCx = Math.floor(minX / cellM);
+  const maxCx = Math.floor(maxX / cellM);
+  const minCy = Math.floor(minY / cellM);
+  const maxCy = Math.floor(maxY / cellM);
+
+  for(let cx = minCx; cx <= maxCx; cx++){
+    for(let cy = minCy; cy <= maxCy; cy++){
+
+      const key = `${cx},${cy}`;
+
+      if(!edgeSpatialIndex.cells.has(key)){
+        edgeSpatialIndex.cells.set(key, []);
+      }
+
+      edgeSpatialIndex.cells.get(key).push(edge);
+    }
+  }
+}
+
+function getCandidateEdgesBySpatialIndex(latlng, radiusCells = 1){
+
+  if(!edgeSpatialIndex || !edgeSpatialIndex.cells){
+    return [];
+  }
+
+  const p = latLngToMeters_(latlng);
+  const cellM = edgeSpatialIndex.cellM;
+
+  const cx = Math.floor(p.x / cellM);
+  const cy = Math.floor(p.y / cellM);
+
+  const map = new Map();
+
+  for(let dx = -radiusCells; dx <= radiusCells; dx++){
+    for(let dy = -radiusCells; dy <= radiusCells; dy++){
+
+      const key = `${cx + dx},${cy + dy}`;
+      const list = edgeSpatialIndex.cells.get(key) || [];
+
+      list.forEach(edge => {
+        map.set(edge.id, edge);
+      });
+    }
+  }
+
+  return Array.from(map.values());
 }
 
 function getNodeId(coord){
@@ -1866,6 +1984,87 @@ function findBestCbByTopology(startNode, feeder){
 
 }
 
+class MinHeap{
+
+  constructor(){
+    this.data = [];
+  }
+
+  push(item){
+    this.data.push(item);
+    this.bubbleUp(this.data.length - 1);
+  }
+
+  pop(){
+
+    if(this.data.length === 0) return null;
+
+    const top = this.data[0];
+    const last = this.data.pop();
+
+    if(this.data.length > 0){
+      this.data[0] = last;
+      this.bubbleDown(0);
+    }
+
+    return top;
+  }
+
+  bubbleUp(index){
+
+    while(index > 0){
+
+      const parent = Math.floor((index - 1) / 2);
+
+      if(this.data[parent].priority <= this.data[index].priority){
+        break;
+      }
+
+      [this.data[parent], this.data[index]] =
+        [this.data[index], this.data[parent]];
+
+      index = parent;
+    }
+  }
+
+  bubbleDown(index){
+
+    const n = this.data.length;
+
+    while(true){
+
+      let smallest = index;
+      const left = index * 2 + 1;
+      const right = index * 2 + 2;
+
+      if(
+        left < n &&
+        this.data[left].priority < this.data[smallest].priority
+      ){
+        smallest = left;
+      }
+
+      if(
+        right < n &&
+        this.data[right].priority < this.data[smallest].priority
+      ){
+        smallest = right;
+      }
+
+      if(smallest === index) break;
+
+      [this.data[smallest], this.data[index]] =
+        [this.data[index], this.data[smallest]];
+
+      index = smallest;
+    }
+  }
+
+  get size(){
+    return this.data.length;
+  }
+}
+
 function dijkstraAll(start){
 
   const dist = new Map();
@@ -1873,31 +2072,32 @@ function dijkstraAll(start){
   const prevEdge = new Map();
   const visited = new Set();
 
-  dist.set(start,0);
+  const heap = new MinHeap();
 
-  while(true){
+  dist.set(start, 0);
+  heap.push({
+    node:start,
+    priority:0
+  });
 
-    let u = null;
-    let best = Infinity;
+  while(heap.size > 0){
 
-    for(const [node,d] of dist.entries()){
+    const current = heap.pop();
+    if(!current) break;
 
-      if(!visited.has(node) && d < best){
-        best = d;
-        u = node;
-      }
+    const u = current.node;
 
-    }
-
-    if(u === null) break;
-
+    if(visited.has(u)) continue;
     visited.add(u);
 
+    const baseDist = dist.get(u);
     const neighbors = graph.adj.get(u) || [];
 
     neighbors.forEach(n => {
 
-      const alt = dist.get(u) + n.edge.distM;
+      if(visited.has(n.to)) return;
+
+      const alt = baseDist + n.edge.distM;
 
       if(alt < (dist.get(n.to) ?? Infinity)){
 
@@ -1905,10 +2105,13 @@ function dijkstraAll(start){
         prev.set(n.to, u);
         prevEdge.set(n.to, n.edge);
 
+        heap.push({
+          node:n.to,
+          priority:alt
+        });
       }
 
     });
-
   }
 
   return {
@@ -1916,7 +2119,6 @@ function dijkstraAll(start){
     prev,
     prevEdge
   };
-
 }
 
 function rebuildPathFromDijkstra(start,target,data){
@@ -1983,10 +2185,29 @@ function featurePointLatLng(f){
 
 function findNearestEdgeToLatLng(latlng){
 
+  let candidates = [];
+
+  // ลองหาแบบเร็วจาก Spatial Index ก่อน
+  candidates = getCandidateEdgesBySpatialIndex(latlng, 1);
+
+  // ถ้าน้อยเกินไป ขยายรอบค้นหา
+  if(candidates.length === 0){
+    candidates = getCandidateEdgesBySpatialIndex(latlng, 2);
+  }
+
+  if(candidates.length === 0){
+    candidates = getCandidateEdgesBySpatialIndex(latlng, 4);
+  }
+
+  // fallback ปลอดภัย: ถ้ายังไม่เจอ ใช้วิธีเดิม scan ทุก edge
+  if(candidates.length === 0){
+    candidates = graph.edges;
+  }
+
   let best = null;
   const p = [latlng.lng, latlng.lat];
 
-  graph.edges.forEach(edge=>{
+  candidates.forEach(edge=>{
 
     const d = pointToSegmentDistanceMeters(
       p,
@@ -1997,11 +2218,43 @@ function findNearestEdgeToLatLng(latlng){
     if(!best || d < best.distanceM){
       best = {
         edge,
-        distanceM:d
+        distanceM:d,
+        candidateCount:candidates.length
       };
     }
 
   });
+
+  // fallback ปลอดภัยอีกชั้น:
+  // ถ้าผลจาก spatial อยู่ไกลเกินมาก อาจแปลว่า cell แคบเกิน ให้ scan ทุก edge เพื่อยืนยัน
+  if(
+    best &&
+    best.distanceM > SNAP_TOLERANCE_M * 5 &&
+    candidates.length < graph.edges.length
+  ){
+    let fullBest = null;
+
+    graph.edges.forEach(edge=>{
+
+      const d = pointToSegmentDistanceMeters(
+        p,
+        edge.aCoord,
+        edge.bCoord
+      );
+
+      if(!fullBest || d < fullBest.distanceM){
+        fullBest = {
+          edge,
+          distanceM:d,
+          candidateCount:graph.edges.length,
+          fallbackFullScan:true
+        };
+      }
+
+    });
+
+    return fullBest;
+  }
 
   return best;
 }
