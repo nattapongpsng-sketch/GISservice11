@@ -319,6 +319,8 @@
       min-height:46px;
     }
   }
+
+
 </style>
 </head>
 
@@ -514,7 +516,68 @@ function initMap(){
 }
 
 function setStatus(msg){
+
+  resetStatusStyle();
+
   document.getElementById('status').innerHTML = msg;
+}
+
+function setCoordinationStatus(coordResult, html){
+
+  const el = document.getElementById('status');
+
+  el.classList.remove(
+    'coord-pass',
+    'coord-warning',
+    'coord-fail'
+  );
+
+  let statusClass = 'coord-warning';
+  let pillClass = 'warning';
+  let icon = '⚠️';
+  let title = 'ตรวจสอบเพิ่มเติม';
+
+  if(coordResult && coordResult.status === 'COORDINATE'){
+    statusClass = 'coord-pass';
+    pillClass = 'pass';
+    icon = '✅';
+    title = 'สัมพันธ์กัน';
+  }
+
+  if(coordResult && coordResult.status === 'NOT_COORDINATE'){
+    statusClass = 'coord-fail';
+    pillClass = 'fail';
+    icon = '🚨';
+    title = 'ไม่สัมพันธ์กัน';
+  }
+
+  if(coordResult && coordResult.status === 'NO_TABLE'){
+    statusClass = 'coord-warning';
+    pillClass = 'warning';
+    icon = '⚠️';
+    title = 'ไม่มีข้อมูลตาราง';
+  }
+
+  el.classList.add(statusClass);
+
+  el.innerHTML = `
+    <div class="coord-status-line">
+      <span class="coord-pill ${pillClass}">
+        ${icon} ${title}
+      </span>
+      <span>${html}</span>
+    </div>
+  `;
+}
+
+function resetStatusStyle(){
+  const el = document.getElementById('status');
+
+  el.classList.remove(
+    'coord-pass',
+    'coord-warning',
+    'coord-fail'
+  );
 }
 
 function showLoading(message = 'กำลังประมวลผล...'){
@@ -1886,7 +1949,8 @@ const coordText =
       )
     : `ไม่สามารถตรวจ DF upstream ได้`;
 
-setStatus(
+setCoordinationStatus(
+  coordResult,
   `Track สำเร็จ ไปยัง CB ` +
   `ระยะ ${(best.path.distanceM/1000).toFixed(3)} km, ` +
   `${faultTypeText} ≈ ${Number(showKA).toFixed(3)} kA, ` +
